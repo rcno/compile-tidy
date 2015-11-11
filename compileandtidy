@@ -1,0 +1,200 @@
+#!/bin/bash
+#
+# Run LaTeX and BibTeX on a given file and organise the parent folder.
+#
+# Copyright (c) 2015, Ragnhild C. Noven
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>
+#
+###################################################################################################
+#
+# Arguments:
+# $1 - the full path to the tex file
+# Output:
+# Formatted error information about the compilation process
+# Side effects:
+# 1) Graphics files (png, eps and pdf) are moved to the subdirectory "Figures"
+# 2) Byproducts of the compilation process (.aux, .bbl files etc.)  are moved to the subfolder Misc
+#
+# The main idea for this script comes from
+# http://jespertoftkristensen.com/JTK/Blog/Entries/2014/1/13_Organize_your_LaTeX_Project.html
+#
+# BEWARE!
+# Due to the side effects mentioned above, running this script on a folder with other unrelated
+# pdf, graphics or auxillary files may not be a good idea, as it will result in unwanted file shuffling. 
+#
+# There is an option to specify a list of pdf files that will *not* be moved to the
+# "Figures" folder; this is done by placing a file called "ignore" in the same folder
+# as the main .tex file, which contains those file names as lines. 
+#
+####################################################################################################
+
+infile="$1"
+
+if [[ "$#" -ne 1 ]]; then
+    scriptname=$(basename "$0")
+    printf "Usage:\n%s <path-to-tex-file>\n" "${scriptname}"
+    exit
+fi
+
+if  [[ ! -f "$infile" ]] || [[ "$infile" != *".tex" ]]; then
+    printf "Argument is not a valid TeX file\n"
+    exit
+fi
+
+# Extract file name without extension
+rawname=$(basename "$infile" ".tex")    
+
+# Extract directory name
+dir="$(dirname "$infile")"
+
+# Finding proper path to the tex file, as infile may be a relative path
+startdir="$PWD"
+cd "$dir" || exit
+texfile="${PWD}/${rawname}.tex"
+cd "$startdir" || exit
+
+function move_figures {
+    # Create directory if necessary
+    if [[ ! -d Figures ]]; then
+	mkdir Figures || exit
+    fi
+    # Move image files
+    for f in *.{png,eps,converted-to.pdf,svg}; do
+	if [[ -f "$f" ]]; then 
+	    mv "$f" Figures
+	fi
+    done
+    # Go through pdf files, only move files without tex correspondence
+    for f in *.pdf; do
+	[[ -f "$f" ]] || continue
+	# Find name of corresponding .tex file
+	#cftex=$(echo "$f" | sed 's/\(.*\)\.pdf/\1.tex/')
+	cftex=${f/.pdf/.tex}
+    	[[ -e "$cftex" ]] && continue
+	isin=0
+	if [[ -e "ignore" ]]; then
+	    while read -r line; do
+	      	if [[ "$line" == "$f" ]]; then 
+		    isin=1
+		    break
+		fi
+	    done < "ignore"
+	fi
+	if [[ $isin == 1 ]]; then
+	    printf "Ignoring %s\n" "$f"
+	else
+	    mv "$f" Figures
+	fi
+    done
+}
+
+function complatex {
+    #Copy back style files for Beamer if they exist
+    if test -n "$(shopt -s nullglob; echo Misc/*.sty)"
+    then
+	cp Misc/*.sty .
+    fi
+    printf "Running LaTeX on %s\n" "${rawname}.tex"
+    pdflatex -shell-escape -file-line-error -interaction=nonstopmode "$texfile" >"${rawname}_output"
+}
+
+function compbibtex {
+    auxname="${rawname}.aux"
+    # Ugly method: copy files from Misc, run bibtex, copy back. 
+    cp Misc/* .
+    printf "Running BibTeX on %s\n" "$auxname"
+    bibtex "$auxname" > "${rawname}_biboutput"
+}
+
+function get_problems {
+    # Extract warnings
+    warnings=$(sed -n '/.*Warning.*/,/^$/p' < "${rawname}_output")
+    if [ "$warnings" ]; then
+	printf "<------------------------------------------------------------------------>\n"
+	printf '%s\n' "${warnings}"
+    fi
+
+    # Extract errors
+    err1=$(sed -n '/tex:[0-9]*:.*/,/^$/p' < "${rawname}_output" ) 
+    err2=$(sed -n '/Runaway argument?.*/,/^$/p' < "${rawname}_output" )
+    err="$err1$err2"
+    if [ "$err" ]; then
+	printf "<------------------------------------------------------------------------>\n"
+	# Print error message literally
+    	printf 'LaTeX ERROR!\n%s\n' "$err"
+    fi
+
+    # If bibtex has been used, extract bibtex errors
+    if [ "$citations" ]
+    then
+	be1=$(sed -n '/I found no.*/,/^$/p' < "${rawname}_biboutput")
+	be2=$(sed -n 's/\(Warning:.*\)/\1/p' < "${rawname}_biboutput")
+	biberr="$be1$be2"
+	if [ "$biberr" ]
+	then
+	    printf "<------------------------------------------------------------------------>\n"
+    	    printf "BibTeX ERROR!\n"
+	    # Print error message literally
+	    printf '%s\n' "$biberr"
+	fi
+    fi
+}
+
+function move_auxfiles {
+    # Create directory if necessary
+    if [[ ! -d Misc ]]; then
+	mkdir Misc || exit
+    fi
+    # Move all auxillary files to folder called Misc
+    find . -maxdepth 1 -regex ".*\.\(aux\|bbl\|blg\|log\|toc\|out\|bib\|bst\|nav\|snm\|glo\|ist\|alg\|synctex.gz\|ind\|sty\)" | while IFS= read -r fname; do
+	mv "$fname" Misc
+    done
+    mv ./*output Misc
+}
+
+###########################################################################
+# Actual compiling
+printf "\n<------------------------------------------------------------------------>\n"
+printf "Starting compilations\n"
+printf "<------------------------------------------------------------------------>\n"
+move_figures
+cd "$dir" || exit
+printf "Moved to %s\n" "$PWD"
+complatex
+# Check for cite commands in document, if so, run BibTeX
+citations=$(grep "cite" "$texfile")
+if [ "$citations" ]
+   then
+       compbibtex 
+       complatex
+       complatex
+fi       
+# Check if we need another latex pass
+refpass=$(grep "Rerun to get cross-references right" "${rawname}_output")
+if [ "$refpass" ]
+then
+    complatex
+fi
+get_problems
+printf "<------------------------------------------------------------------------>\n"
+# Extract line giving number of pages in compiled pdf
+sed -n 's/.*(\([0-9]* page[s]*\).*/Compiled \1/p' < "${rawname}_output" 
+move_auxfiles
+printf "Finished compilations\n"
+printf "<------------------------------------------------------------------------>\n"
+
+
+
+
